@@ -16,4 +16,5 @@ Below is a graphical summary of the tissue/ neighborhhood features computed.
 <img src='/tissue_feat.png' height='400' width='600'>
 <br/>
 
-Please refer to the example notebooks for more information on the features andbthheir computation.
+Please refer to the example notebooks for more information on the features and their computation.
+
