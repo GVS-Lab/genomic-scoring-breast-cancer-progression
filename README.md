@@ -6,7 +6,7 @@ Below is a graphical summary of the features used to measure chromatin architect
 
 <br/> 
 <p align="center">
-<img src='/nuclear_feat.png' height='200' width='600'>
+<img src='/nuclear_feat.png' height='250' width='600'>
 <br/>
 
 Below is a graphical summary of the tissue/ neighborhhood features computed.
