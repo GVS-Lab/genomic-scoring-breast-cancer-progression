@@ -4,6 +4,16 @@ Tumor initiation and progression is driven by both intracellular changes within 
 
 Below is a graphical summary of the features used to measure chromatin architecture. 
 
+<br/> 
+<p align="center">
+<img src='/nuclear_feat.png' height='300' width='600'>
+<br/>
+
 Below is a graphical summary of the tissue/ neighborhhood features computed.
 
-Please refer to the 
+<br/> 
+<p align="center">
+<img src='/tissue_feat.png' height='300' width='600'>
+<br/>
+
+Please refer to the example notebooks for more information on the features andbthheir computation.
