@@ -16,5 +16,7 @@ Below is a graphical summary of the tissue/ neighborhhood features computed.
 <img src='/tissue_feat.png' height='400' width='600'>
 <br/>
 
-Please refer to the example notebooks for more information on the features and their computation.
+Please refer to the notes_on_feature_extraction for more information on the features and their computation.
 
+Illustration of the scoring can bee seen here[![Open In Colab](https://colab.research.google.com/drive/1yuxPTpvsj0xQm9PU0vlt7PRZ5MhqYbXx?usp=sharing)
+ 
