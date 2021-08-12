@@ -1,0 +1,813 @@
+---
+title: "Mechano-Genomic Score"
+output:
+  html_document:
+  toc: yes
+df_print: paged
+html_notebook:
+  toc: yes
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r import_libraries_directories, echo=FALSE, message=FALSE, warning=FALSE}
+library("data.table")
+source("functions_library.R")
+
+path_to_NMCO_features = "~/Documents/Mechanogenomic_Score_Breast_Cancer/NMCO_features/"
+path_to_annotations = "~/Documents/Mechanogenomic_Score_Breast_Cancer/TMA_Clinical_Annotation.csv"
+output_path_to_data = "~/Documents/Mechanogenomic_Score_Breast_Cancer/MGS_data_and_models/"
+
+```
+
+## Background and Aim
+
+The packing of the genome within the nucleus informs the cellular state. Therefore, changes in DNA packing information would be a powerful barometer of cell state transitions in important processes such as cancer progression, where there is an unmet need for biomakers. The gold standard for cell abnormalities in cancer is the nuclear grading done by a pathologist using a microscope. High resolution images of DNA as visualised using a fluorescent microscope is a convenient tool to measure DNA organization and build a quantitative framework for cell state transitions. 
+
+Our samples are obtained from tissue microarray (TMA) slides containing annotated clinical biopsies from cancer patients as well as healthy individuals stained for DNA using Hoechst. Segmentation and feature extraction was carried out in python. We have obtained morphometric and texture features for every single nucleus in a given tissue microarray.
+
+Our goal now is to reduce the dimensionsality of the feature space such that we obtain a score that is different for cancer and normal nuclei. In this exercise we aim to find out if we label all nuclei from a normal tissue as "normal" and all nuclei from a cancerous tissue as "cancer", can we reliably distinguish between the two at the single cell level. Note that since we do not have the ground truth information at the single cell level, we do not expect very high levels of accuracies at the single cell level, but we expect that the majority of the nuclei in the tissue will be faithfully predicted. 
+
+
+### Preprocessing data
+
+Once we read in all the data, we drop some uninformative columns such as centroids, orientation, etc and features with constant values and remove nuclei that do not adhere to the following conditions. 
+
+* Area is between 30-5000 (~2-300 sq.microns)
+* Median intensity is at least 10
+* Standard deviation of intensity is at least 2
+
+The above filters will make sure that very small or very large nuclei or nuclei that are under exposed or fully saturated or out of focus are not included in the analysis. This filter will also remove small objects with very uniform texture such as mitotic nuclei. Hence, after the filtration, we expect to have proper interphase nuclei.  
+
+
+```{r read_prepare_data, echo=FALSE, message=FALSE, warning=FALSE}
+# Read in the data set, annotations and clean
+NMCO_features<-combine_all_files_into_one(path_to_NMCO_features,"csv")
+NMCO_features$nucid=paste(NMCO_features$Image,NMCO_features$label,sep="_")
+rownames(NMCO_features)=NMCO_features$nucid
+
+#Removing uninformative columns and cleaning the dataset 
+columns_to_drop<-c("V1","label","Image","nucid",'bbox-0', 'bbox-1','bbox-2', 'bbox-3',
+                   'centroid-0', 'centroid-1','orientation','weighted_centroid-0','weighted_centroid-1')
+allData=NMCO_features[,-c(which(colnames(NMCO_features)%in%columns_to_drop))]
+allData<-subset(allData, allData$area>30 & allData$area<=5000 & allData$Int_Median>10 & allData$Int_SD>=2)
+#Take care of NaN and Inf and remove columns with constant values
+allData[sapply(allData, is.infinite)] <- NA
+allData[is.na(allData)] <- 0
+allData=allData[,apply(allData, 2, var, na.rm=TRUE) != 0]
+
+print( paste("Number of nuclei in the dataset after filtering is", nrow(NMCO_features), "and the number of nuclei filtered is", nrow(NMCO_features)-nrow(allData)))
+
+#knitr::kable(t(colnames(allData)), caption="NMCO Features")
+
+
+```
+
+Below is a summary of the dataset we are working with.
+```{r summarise_annotations, echo=FALSE, message=FALSE, warning=FALSE}
+#read in the annotations by the clinians
+anno<- fread(path_to_annotations, showProgress = T,data.table = FALSE)
+stages_of_cancer<-c("Normal","Hyperplasia","Fibroadenoma","DCIS","ILC","IDC","Metastasis")
+# Get tissue labels for selected stages of cancer
+S0_Normal_TiD = subset(anno,anno$`Pathology diagnosis`=="Breast tissue" & anno$Type=="Normal")$Tissue_ID
+S1_Hyperplasia_TiD = subset(anno,anno$`Pathology diagnosis`=="Hyperplasia" & anno$Type=="Hyperplasia")$Tissue_ID
+S2_Fibroadenoma_TiD = subset(anno,anno$`Pathology diagnosis`=="Fibroadenoma" & anno$Type=="Benign")$Tissue_ID
+S3_DCIS_TiD = subset(anno,anno$`Pathology diagnosis`=="Ductal carcinoma in situ" & anno$Type=="Malignant")$Tissue_ID
+S4_ILC_TiD = subset(anno,anno$`Pathology diagnosis`=="Invasive lobular carcinoma" & anno$Type=="Malignant")$Tissue_ID
+S5_IDC_TiD = subset(anno,anno$`Pathology diagnosis`=="Invasive ductal carcinoma" & anno$Type=="Malignant")$Tissue_ID
+S6_Metastatic_TiD = subset(anno,anno$`Pathology diagnosis`=="Metastatic carcinoma from breast" & anno$Type=="Metastasis")$Tissue_ID
+
+Train_TiD = subset(anno,anno$Testing_Status=="Train")$Tissue_ID
+Test_TiD = subset(anno,anno$Testing_Status=="Test")$Tissue_ID
+
+# Get nuclear labels for selected stages of cancer
+S0_Normal_NiD = subset(NMCO_features,NMCO_features$Image %in%S0_Normal_TiD)$nucid
+S1_Hyperplasia_NiD = subset(NMCO_features,NMCO_features$Image %in%S1_Hyperplasia_TiD)$nucid
+S2_Fibroadenoma_NiD = subset(NMCO_features,NMCO_features$Image %in%S2_Fibroadenoma_TiD)$nucid
+S3_DCIS_NiD = subset(NMCO_features,NMCO_features$Image %in%S3_DCIS_TiD)$nucid
+S4_ILC_NiD = subset(NMCO_features,NMCO_features$Image %in%S4_ILC_TiD)$nucid
+S5_IDC_NiD = subset(NMCO_features,NMCO_features$Image %in%S5_IDC_TiD)$nucid
+S6_Metastatic_NiD = subset(NMCO_features,NMCO_features$Image %in%S6_Metastatic_TiD)$nucid
+
+Stage_NiD<-list(S0_Normal_NiD= S0_Normal_NiD,
+                S1_Hyperplasia_NiD =S1_Hyperplasia_NiD,
+                S2_Fibroadenoma_NiD = S2_Fibroadenoma_NiD,
+                S3_DCIS_NiD = S3_DCIS_NiD,
+                S4_ILC_NiD = S4_ILC_NiD,
+                S5_IDC_NiD = S5_IDC_NiD,
+                S6_Metastatic_NiD =S6_Metastatic_NiD)
+
+Stage_TiD<-list(S0_Normal_TiD= S0_Normal_TiD,
+                S1_Hyperplasia_TiD =S1_Hyperplasia_TiD,
+                S2_Fibroadenoma_TiD = S2_Fibroadenoma_TiD,
+                S3_DCIS_TiD = S3_DCIS_TiD,
+                S4_ILC_TiD = S4_ILC_TiD,
+                S5_IDC_TiD = S5_IDC_TiD,
+                S6_Metastatic_TiD =S6_Metastatic_TiD)
+
+#summarize the nuclear number before and after the filtering
+numb_tissues<-unlist(lapply(list(S0_Normal_TiD,S1_Hyperplasia_TiD,S2_Fibroadenoma_TiD,
+                                 S3_DCIS_TiD,S4_ILC_TiD,S5_IDC_TiD,S6_Metastatic_TiD), 
+                            function (x) length(x) ))
+numb_nuc_before_filtering<-unlist(lapply(list(S0_Normal_NiD,S1_Hyperplasia_NiD,S2_Fibroadenoma_NiD,
+                                              S3_DCIS_NiD,S4_ILC_NiD,S5_IDC_NiD,S6_Metastatic_NiD), 
+                                         function (x) length(x) ))
+
+numb_nuc_after_filtering<-c(sum(S0_Normal_NiD %in% rownames(allData)),
+                            sum(S1_Hyperplasia_NiD %in% rownames(allData)),
+                            sum(S2_Fibroadenoma_NiD %in% rownames(allData)),
+                            sum(S3_DCIS_NiD %in% rownames(allData)),
+                            sum(S4_ILC_NiD %in% rownames(allData)),
+                            sum(S5_IDC_NiD %in% rownames(allData)),
+                            sum(S6_Metastatic_NiD %in% rownames(allData)))
+
+data_summary<-as.data.frame(cbind(stages_of_cancer,numb_tissues,numb_nuc_before_filtering,numb_nuc_after_filtering))
+knitr::kable(data_summary, caption="Dataset")
+rm(numb_nuc_after_filtering,numb_nuc_before_filtering,numb_tissues,data_summary)
+```
+
+## Scoring system for distinguishing normal and cancer nuclei 
+
+We scale the data and then PCA to reduce dimensionality and maybe regularise the data.
+
+```{r PCA, echo=FALSE, fig.height=4, fig.width=4, message=FALSE, warning=FALSE, fig.align="center"}
+
+Relevant_Data = allData[which(rownames(allData) %in% c(S0_Normal_NiD,S1_Hyperplasia_NiD,
+                                                       S4_ILC_NiD,S5_IDC_NiD)),]
+
+# Scale data
+pop_avg_feature_value = apply(Relevant_Data,2,mean)
+pop_std_feature_value = apply(Relevant_Data,2,sd)
+
+#Scale data
+Data_scaled=sweep(Relevant_Data, MARGIN=2, pop_avg_feature_value, `-`)
+Data_scaled=sweep(Data_scaled, MARGIN=2, pop_std_feature_value, `/`)
+
+#perform PCA
+nucleus_pca <- princomp(Data_scaled,  scores = TRUE ,cor=F) # perform PCA 
+# Extract PCA scores
+pca_scores<-nucleus_pca$scores 
+t<-rownames(pca_scores)
+pca_scores<- as.data.frame(pca_scores)
+pca_scores$nucid<-t
+pca_scores<-merge(pca_scores,NMCO_features[,which(colnames(NMCO_features) %in% c("nucid","Image"))], by="nucid",all=F)
+d0<-subset(pca_scores, pca_scores$nucid %in% S0_Normal_NiD)
+d1<-subset(pca_scores, pca_scores$nucid %in% S1_Hyperplasia_NiD)
+d4<-subset(pca_scores, pca_scores$nucid %in% S4_ILC_NiD)
+d5<-subset(pca_scores, pca_scores$nucid %in% S5_IDC_NiD)
+d0$Stage<-"Normal"
+d1$Stage<-"Normal"
+d4$Stage<-"Cancer"
+d5$Stage<-"Cancer"
+pca_scores<-rbind(d0,d1,d4,d5)
+rm (d0,d1,d4,d5,t)
+rownames(pca_scores)<-pca_scores$nucid
+
+#png(filename="pca_var_exp.png", units="in", width=2, height=2 , pointsize=7, res=1200)
+par(font.axis = 2,font.lab=2,mar=c(4,4,1,1), font=2)
+plot(1:ncol(Data_scaled),cumsum(nucleus_pca$sdev^2)/sum(nucleus_pca$sdev^2),type='o',pch=19,
+     cex=0.5,las=1,xlab="PC",ylab="Fraction of Variance Explained")
+#dev.off()
+
+```
+
+
+We divide the dataset (PCA scores) into training (70%) and test (30%). Then we use Linear Discriminant Analysis to distinguish Normal and Cancer nuclei. 
+
+Normal nuclei are obtained from TMAs whose clinical diagnosis is "Normal Breast Tissue" and "Hyperplasia". 
+Cancer nuclei are obtained from TMAs whose clinical diagnosis is "Invasive Ductal Carcinoma" and "Invasive Lobular Carcinoma". 
+
+```{r obtaining_training_test_data, message=FALSE, warning=FALSE, include=FALSE}
+#Divide the data into training and test data
+set.seed(123)   # set seed to ensure you always have same random numbers generated
+
+training_tissues = subset(pca_scores,pca_scores$Image %in% Train_TiD)
+train<-training_tissues[as.vector(sapply(unique(training_tissues$Image), 
+                                     function(x){
+                                       sample(which(training_tissues$Image==x), floor(0.8*min(table(training_tissues$Image))),replace=F)
+                                     })), ]
+
+train<-train[as.vector(sapply(unique(train$Stage), 
+                                     function(x){
+                                       sample(which(train$Stage==x), floor(0.8*min(table(train$Stage))), replace=F)
+                                     })), ]
+test=pca_scores[which(!rownames(pca_scores) %in% rownames(train)),]
+
+```
+
+```{r LDA_normal_vs_cancer, message=FALSE, warning=FALSE, include=FALSE}
+
+# perfrom LDA
+LDA_normal_vs_cancer <- MASS::lda(Stage ~. , data = train[,c(2:101,ncol(train))]) 
+
+#Prepare Contingency tables and compute robustness features
+train_lda_res=caret::confusionMatrix(predict(LDA_normal_vs_cancer, newdata = train)$class, as.factor(train$Stage))
+test_lda_res=caret::confusionMatrix(predict(LDA_normal_vs_cancer, newdata = test)$class, as.factor(test$Stage))
+train_lda_pred=predict(LDA_normal_vs_cancer, newdata = train)
+test_lda_pred=predict(LDA_normal_vs_cancer, newdata = test)
+
+#Area under ROC analysis
+pf_train <- ROCR::performance(ROCR::prediction(train_lda_pred$posterior[,2],
+                                               train$Stage), "tpr","fpr")
+pf_test <- ROCR::performance(ROCR::prediction(test_lda_pred$posterior[,2],
+                                              test$Stage),"tpr","fpr")
+AUC_train = ROCR::performance(ROCR::prediction(train_lda_pred$posterior[,2],train$Stage), measure = "auc")@y.values[[1]]
+AUC_test = ROCR::performance(ROCR::prediction(test_lda_pred$posterior[,2],test$Stage), measure = "auc")@y.values[[1]]
+
+#summarise the predictions at the single cell level
+train_lda=as.data.frame(train_lda_pred$x)
+test_lda=as.data.frame(test_lda_pred$x)
+train_lda$predicted_class=train_lda_pred$class
+test_lda$predicted_class=test_lda_pred$class
+train_lda$ind="train"
+test_lda$ind="test"
+lda_summary<-rbind(train_lda,test_lda)
+rm(train_lda,test_lda)
+lda_summary$nucid=rownames(lda_summary)
+lda_summary<-merge(lda_summary,pca_scores[,which(colnames(pca_scores) %in% c("nucid","Image","Stage"))],by="nucid")
+lda_summary$Correct_pred<-ifelse(lda_summary$Stage==lda_summary$predicted_class,1,0)
+```
+
+### Measuring prediction error of the model
+
+```{r ROC_plot_nuc, echo=FALSE, fig.height=4, fig.width=8, message=FALSE, warning=FALSE, fig.align="center"}
+par(font.axis = 2,font.lab=2,mar=c(6,5,1,1), font=2,mfrow=c(1,2))
+plot(pf_train, main="Training data",las=1)
+abline(a = 0, b = 1,lty=2)
+title(sub= paste("AUC =",round(AUC_train,4)), adj=1, line=4, font=2)  
+plot(pf_test, main="Test data",las=1)
+abline(a = 0, b = 1,lty=2)
+title(sub= paste("AUC =",round(AUC_test,4)), adj=1, line=4, font=2)  
+rm(pf_train,pf_test)
+
+```
+Printing model contingency tables.
+```{r contingency_tables, echo=FALSE, message=FALSE, warning=FALSE}
+print ("Training")
+print(train_lda_res$table)
+print ("Test")
+print(test_lda_res$table)
+```
+Below are some features that assess the validity of the model. 
+
+```{r model_robustness_nuclear, echo=FALSE, message=FALSE, warning=FALSE}
+nuclear_robustness<-cbind(c(train_lda_res$byClass,AUC_train),
+                          c(test_lda_res$byClass,AUC_test))
+rownames(nuclear_robustness)[nrow(nuclear_robustness)]<-"AUC_ROC"
+colnames(nuclear_robustness)<-c("Training","Test")
+knitr::kable(nuclear_robustness, caption="")
+rm(AUC_train,AUC_test)
+```
+
+
+
+To test the generalizability of the training, we computed K-fold cross validation error (Standard Deviation) of the above model robustness features(k=30).
+
+```{r LDA_normal_vs_cancer_cross_validation, echo=FALSE, message=FALSE, warning=FALSE}
+# perfrom LDA with cross validation
+knitr::kable(cross_validation_error_lda(train[,c(2:101,ncol(train))],30),caption="K-fold Cross-Validation")
+rm(test,train)
+
+```
+
+
+### Mechano-Genomic score for discriminating normal and cancer nuclei
+
+Below we visualise the linear discriminant in the two tissue conditions
+
+```{r nuclearlevel_LD1_plots, echo=FALSE, fig.height=4, fig.width=8, message=FALSE, warning=FALSE, fig.align="center"}
+par(font.axis = 2,font.lab=2,mar=c(6,5,1,1), font=2,mfrow=c(1,2))
+#boxplot and t-test
+boxplot(subset(lda_summary,lda_summary$Stage=="Normal")$LD1,
+        subset(lda_summary,lda_summary$Stage=="Cancer")$LD1,
+        ylab="Linear Discriminant",names = c("Normal","Cancer"),
+        outline=T, lty=1, horizontal = F, las=1,col=c("blue","red"), 
+        ylim=c(-6,6), pch=18)
+title(sub= paste("Wilcox test =",round(
+  wilcox.test(subset(lda_summary,lda_summary$Stage=="Normal")$LD1,
+                subset(lda_summary,lda_summary$Stage=="Cancer")$LD1)$p.value,3)), 
+  adj=1, line=4, font=2)  
+#density histogram
+plot(density(subset(lda_summary,lda_summary$Stage=="Normal")$LD1), col="blue",
+     xlab="Linear Discriminant",lwd = 2,lty = 1,xlim=c(-5,5), main="")      
+lines(density(subset(lda_summary,lda_summary$Stage=="Cancer")$LD1), col="red",lwd = 2,lty = 1)   
+```
+
+We then compute a mechanogenomic score from the linear discriminant as follows:
+$$MGS(i) = 
+\begin{cases}
+    \frac{LD(i)-min(LD)}{max(LD)-min(LD)},& \text{if } -4\leq LD(i)\leq 4\\
+    \frac{-4   -min(LD)}{max(LD)-min(LD)},& \text{if }  LD(i)< -4\\
+    \frac{4   -min(LD)}{max(LD)-min(LD)},& \text{if }   LD(i)> 4\\
+\end{cases}$$
+
+The rational is to avoid extreme values by setting a minimum and maximum limit for the linear discriminant (LD) and to reset the range between 0-1. We set the limits of LD to be between -4 and 4 as most of the values of LD1 exist within this range (see above for distribution and below for the the exact fraction).
+
+```{r MGS_vs_LD1, echo=FALSE, fig.height=4, fig.width=4, message=FALSE, warning=FALSE, fig.align="center"}
+#first we set the limits and set the range from 0-1
+mgs= ifelse(lda_summary$LD1 <=4,lda_summary$LD1,4)
+mgs= ifelse(mgs >= -4,mgs, -4)
+upper = max(mgs)
+lower = min(mgs)
+mgs= (mgs-lower)/(upper-lower)
+par(font.axis = 2,font.lab=2,mar=c(4,4,1,1), font=2)
+plot(mgs~lda_summary$LD1,xlim=c(-5,5),las=1, pch=18,cex=0.5,
+     ylab="Mechano-Genomic Score",xlab="Linear Discriminant")
+lda_summary$MGS<- mgs
+
+print( paste("Fraction of nuclei with LD between -4 and 4 is", round(nrow(subset(lda_summary, lda_summary$LD1 <=4 & lda_summary$LD1 >=-4))/nrow(lda_summary),4)))
+rm(mgs)
+```
+
+Below we visualise the Mechano-Genomic Scores in the two tissue conditions
+
+```{r nuclearlevel_MGS_plots, echo=FALSE, fig.height=4, fig.width=8, message=FALSE, warning=FALSE, fig.align="center"}
+par(font.axis = 2,font.lab=2,mar=c(6,5,1,1), font=2,mfrow=c(1,2))
+#boxplot and t-test
+boxplot(subset(lda_summary,lda_summary$Stage=="Normal")$MGS,
+        subset(lda_summary,lda_summary$Stage=="Cancer")$MGS,
+        ylab="Mechano-Genomic Score",names = c("Normal","Cancer"),
+        outline=F, lty=1, horizontal = F, las=1,col=c("blue","red"))
+title(sub= paste("Wilcox test =",round(
+  wilcox.test(subset(lda_summary,lda_summary$Stage=="Normal")$MGS,
+                subset(lda_summary,lda_summary$Stage=="Cancer")$MGS)$p.value,3)), 
+  adj=1, line=4, font=2)  
+#density histogram
+plot(density(subset(lda_summary,lda_summary$Stage=="Normal")$MGS), col="blue",
+     xlab="Mechano-Genomic Score",lwd = 2,lty = 1,xlim=c(0,1), main="")      
+lines(density(subset(lda_summary,lda_summary$Stage=="Cancer")$MGS), col="red",lwd = 2,lty = 1)   
+```
+
+
+### Comprehending the Mechanogenomic score
+
+In order to understand what features the contribute most to the MGS, we computed the correlation coefficient between MGS and all the Nuclear Morphometric and Chromatin Organization Features for nuclei from normal and invasive cancer TMA.
+PCC: Pearson Correlation Coefficient
+SRC: Spearman Rank Correlation
+
+```{r MGS_vs_NMCO_norm_cancer, echo=FALSE, message=FALSE, warning=FALSE}
+
+combined_data <- Relevant_Data
+combined_data$nucid <- rownames(combined_data)
+combined_data<-merge(lda_summary[,which(colnames(lda_summary) %in% c("MGS","nucid","Image","Stage"))], combined_data,by = "nucid")
+feature_cor<-as.data.frame(matrix(nrow = ncol(Relevant_Data),
+                                  ncol = 3))
+colnames(feature_cor)<-c("Feature","PCC_w_MGS","SRC_w_MGS")
+for( i in 1:ncol(Relevant_Data)){
+  feature_cor$Feature[i]   <- colnames(Relevant_Data)[i]
+  feature_cor$PCC_w_MGS[i] <- cor(combined_data[,which(colnames(combined_data) == colnames(Relevant_Data)[i])],combined_data$MGS, method ="pearson")
+  feature_cor$SRC_w_MGS[i] <- cor(combined_data[,which(colnames(combined_data) == colnames(Relevant_Data)[i])],combined_data$MGS, method ="spearman")
+}
+#top 15 most positively and negatively correlated features
+top_feat<-rbind((feature_cor[rev(order(feature_cor$SRC_w_MGS)),])[1:15,],
+            (feature_cor[(order(feature_cor$SRC_w_MGS)),])[1:15,])
+```
+
+Below is a heatmap showing the correlation for all features. 
+
+
+```{r MGS_vs_NMCO_norm_cancer_all_heatmap, echo=FALSE, fig.height=7, fig.width=6, message=FALSE, warning=FALSE, fig.align="center"}
+par(font.axis = 2,font.lab=2, font=2)
+gplots::heatmap.2(as.matrix(feature_cor[,-1]),
+                  col = gplots::redblue(50),
+                  Rowv = NA,Colv = NA,dendrogram ="none",
+                  key.xlab = "Cor",key.title = "",keysize = 2,
+                  trace="none",density.info="none",
+                  srtCol = 0,cexCol = 1,cexRow = 0.6,
+                  labCol = c("PCC","SRC"),
+                  labRow = feature_cor$Feature,
+                  margins =c(2,10))   
+```
+
+Below are the top 30 features.
+
+```{r MGS_vs_NMCO_norm_cancer_top_heatmap, echo=FALSE, fig.height=5, fig.width=4.5, message=FALSE, warning=FALSE, fig.align="center"}
+par(font.axis = 2,font.lab=2, font=2)
+gplots::heatmap.2(as.matrix(top_feat[,-1]),
+                  col = gplots::redblue(50),
+                  Rowv = NA,Colv = NA,dendrogram ="none",
+                  key.xlab = "Cor",key.title = "", keysize = 2,
+                  trace="none",density.info="none",
+                  srtCol = 0,cexCol = 1,cexRow = 0.6,
+                  labCol = c("PCC","SRC"),
+                  labRow = top_feat$Feature,
+                  margins =c(2,10))
+```
+
+
+```{r MGS_vs_NMCO_norm_cancer_top_bar, echo=FALSE, fig.height=5, fig.width=4.5, message=FALSE, warning=FALSE, fig.align="center"}
+top_feat<-top_feat[(order(top_feat$PCC_w_MGS)),]
+
+par(font.axis = 2,font.lab=2, font=2, mar=c(4,10,1,1))
+barplot(c(rev(top_feat$PCC_w_MGS)[1:10],rev(top_feat$PCC_w_MGS[1:10])), horiz =T, 
+        names= c(rev(top_feat$Feature)[1:10],rev(top_feat$Feature[1:10])), las=1, 
+        xlab="Correlation coefficient (MGS)")
+```
+
+```{r dropping_some_more_columns}
+columns_to_drop_not_interpreatble<-c("weighted_moments-0-0", "weighted_moments-0-1",
+                                      "weighted_moments-0-2","weighted_moments-0-3",
+                                     "weighted_moments-1-0", "weighted_moments-1-1",
+                                      "weighted_moments-1-2","weighted_moments-1-3",
+                                     "weighted_moments-2-0", "weighted_moments-2-1",
+                                      "weighted_moments-2-2","weighted_moments-2-3",
+                                     "weighted_moments-3-0", "weighted_moments-3-1",
+                                      "weighted_moments-3-2","weighted_moments-3-3",
+                            "weighted_moments_central-0-0", "weighted_moments_central-0-1",
+                            "weighted_moments_central-0-2","weighted_moments_central-0-3",
+                          "weighted_moments_central-1-0", "weighted_moments_central-1-1",
+                            "weighted_moments_central-1-2","weighted_moments_central-1-3",
+                          "weighted_moments_central-2-0", "weighted_moments_central-2-1",
+                          "weighted_moments_central-2-2","weighted_moments_central-2-3",
+                          "weighted_moments_central-3-0", "weighted_moments_central-3-1",
+                          "weighted_moments_central-3-2","weighted_moments_central-3-3",
+                          "weighted_moments_normalized-0-0", "weighted_moments_normalized-0-1",
+                          "weighted_moments_normalized-0-2","weighted_moments_normalized-0-3",
+                          "weighted_moments_normalized-1-0", "weighted_moments_normalized-1-1",
+                          "weighted_moments_normalized-1-2","weighted_moments_normalized-1-3",
+                          "weighted_moments_normalized-2-0", "weighted_moments_normalized-2-1",
+                          "weighted_moments_normalized-2-2","weighted_moments_normalized-2-3",
+                          "weighted_moments_normalized-3-0", "weighted_moments_normalized-3-1",
+                          "weighted_moments_normalized-3-2","weighted_moments_normalized-3-3",
+                          "moments-0-0", "moments-0-1",
+                          "moments-0-2","moments-0-3",
+                          "moments-1-0", "moments-1-1",
+                          "moments-1-2","moments-1-3",
+                          "moments-2-0", "moments-2-1",
+                          "moments-2-2","moments-2-3",
+                          "moments-3-0", "moments-3-1",
+                          "moments-3-2","moments-3-3",
+                          "moments_normalized-0-0", "moments_normalized-0-1",
+                          "moments_normalized-0-2","moments_normalized-0-3",
+                          "moments_normalized-1-0", "moments_normalized-1-1",
+                          "moments_normalized-1-2","moments_normalized-1-3",
+                          "moments_normalized-2-0", "moments_normalized-2-1",
+                          "moments_normalized-2-2","moments_normalized-2-3",
+                          "moments_normalized-3-0", "moments_normalized-3-1",
+                          "moments_normalized-3-2","moments_normalized-3-3",
+                          "moments_central-0-0", "moments_central-0-1",
+                          "moments_central-0-2","moments_central-0-3",
+                          "moments_central-1-0", "moments_central-1-1",
+                          "moments_central-1-2","moments_central-1-3",
+                          "moments_central-2-0", "moments_central-2-1",
+                          "moments_central-2-2","moments_central-2-3",
+                          "moments_central-3-0", "moments_central-3-1",
+                          "moments_central-3-2","moments_central-3-3",
+                          "HC_area_EC_area","HC_area_Nuc_area",
+                          "HC_content_DNA_content","HC_content_EC_content",
+                          "weighted_moments_hu-0","weighted_moments_hu-1",
+                          "weighted_moments_hu-2","weighted_moments_hu-3",
+                          "weighted_moments_hu-4","weighted_moments_hu-5",
+                          "weighted_moments_hu-6",
+                          "moments_hu-0","moments_hu-1",
+                          "moments_hu-2","moments_hu-3",
+                          "moments_hu-4","moments_hu-5",
+                          "moments_hu-6")
+Relevant_Data_sub=Relevant_Data[,-c(which(colnames(Relevant_Data)%in%columns_to_drop_not_interpreatble))]
+combined_data <- Relevant_Data_sub
+
+combined_data$nucid <- rownames(combined_data)
+combined_data<-merge(lda_summary[,which(colnames(lda_summary) %in% c("MGS","nucid","Image","Stage"))], combined_data,by = "nucid")
+feature_cor<-as.data.frame(matrix(nrow = ncol(Relevant_Data_sub),
+                                  ncol = 3))
+colnames(feature_cor)<-c("Feature","PCC_w_MGS","SRC_w_MGS")
+for( i in 1:ncol(Relevant_Data_sub)){
+  feature_cor$Feature[i]   <- colnames(Relevant_Data_sub)[i]
+  feature_cor$PCC_w_MGS[i] <- cor(combined_data[,which(colnames(combined_data) == colnames(Relevant_Data_sub)[i])],combined_data$MGS, method ="pearson")
+  feature_cor$SRC_w_MGS[i] <- cor(combined_data[,which(colnames(combined_data) == colnames(Relevant_Data_sub)[i])],combined_data$MGS, method ="spearman")
+}
+#top 15 most positively and negatively correlated features
+top_feat<-rbind((feature_cor[rev(order(feature_cor$SRC_w_MGS)),])[1:15,],
+            (feature_cor[(order(feature_cor$SRC_w_MGS)),])[1:15,])
+
+
+```
+
+```{r MGS_vs_NMCO_norm_cancer_top_interpret_bar, echo=FALSE, fig.height=5, fig.width=4.5, message=FALSE, warning=FALSE, fig.align="center"}
+top_feat<-top_feat[(order(top_feat$PCC_w_MGS)),]
+
+par(font.axis = 2,font.lab=2, font=2, mar=c(4,10,1,1))
+barplot(c(rev(top_feat$PCC_w_MGS)[1:10],rev(top_feat$PCC_w_MGS[1:10])), horiz =T, 
+        names= c(rev(top_feat$Feature)[1:10],rev(top_feat$Feature[1:10])), las=1, 
+        xlab="Correlation with MGS")
+box()
+abline(v=0)
+```
+
+
+### Summarising Predictions at the Tissue level
+
+For each tissue we obtain the number of nuclei predicted as "Normal" and "Cancer" and then we obtained the Tissue level prediction based on the maximum number of predictions in either classes. That is the tissue with a more nuclei predicted as "Normal" will be classified as 'Normal'.
+
+```{r Tissue_level_predictions, echo=FALSE, message=FALSE, warning=FALSE}
+#Getting Tissue level predictions
+Tissue_summary<-Tissue_pred_classes(lda_summary)
+d1<-subset(Tissue_summary,Tissue_summary$Image %in% Train_TiD)
+d2<-subset(Tissue_summary,Tissue_summary$Image %in% Test_TiD)
+d1$Tissue_testing_status = "Train"
+d2$Tissue_testing_status = "Train"
+Tissue_summary= rbind(d1,d2)
+Tissue_level_acc_train<- caret::confusionMatrix(as.factor(d1$pred_Stage),
+                                                as.factor(d1$act_Stage))
+Tissue_level_acc_test<- caret::confusionMatrix(as.factor(d2$pred_Stage),
+                                                as.factor(d2$act_Stage))
+
+AUC_train = ROCR::performance(ROCR::prediction(d1$n_pred_Normal/d1$num_nuclei,
+                                               as.factor(d1$act_Stage)), 
+                              measure = "auc")@y.values[[1]]
+AUC_test = ROCR::performance(ROCR::prediction(d2$n_pred_Normal/d2$num_nuclei,
+                                               as.factor(d2$act_Stage)), 
+                              measure = "auc")@y.values[[1]]
+rm(d1,d2)
+
+```
+
+Below are the fraction of nuclei correctly predicted to be either of the two classes. We can see that for normal tissues, over 90 % of the nuclei are correctly predicted as normal. On the other hand, in the cancer tissues the fraction of nuclei predicted as cancer is variable between TMAs but is always above 50%. This is expected as while all the cells in the normal TMAs are normal, cancer TMAs will contain a mixture of the cancer an normal cells and the fraction of these cells will be different for different patients. 
+
+```{r Tissue_level_norm_cancer_plots, echo=FALSE, fig.height=4, fig.width=8, message=FALSE, warning=FALSE, fig.align="center"}
+par(font.axis = 2,font.lab=2,mar=c(6,5,1,1), font=2, mfrow=c(1,2))
+#boxplot with jitter to show the True positive rate/Recall at the tissue level
+boxplot(Tissue_summary$TPR~Tissue_summary$act_Stage,
+        ylab="Fraction of nuclei correctly predicted",xlab="",
+        names = c("Cancer","Normal"),
+        outline=T, lty=1, horizontal = F, las=1,col=c("red","blue"), pch=18)
+stripchart(Tissue_summary$TPR~Tissue_summary$act_Stage,
+            vertical = TRUE, method = "jitter", add = TRUE, pch = 18, col = 'black',cex=0.5)
+
+
+#barplot with t-test
+means=c(mean(subset(Tissue_summary,Tissue_summary$act_Stage == "Normal")$TPR),
+        mean(subset(Tissue_summary,Tissue_summary$act_Stage == "Cancer")$TPR))
+se = c(sd(subset(Tissue_summary,Tissue_summary$act_Stage == "Normal")$TPR),
+       sd(subset(Tissue_summary,Tissue_summary$act_Stage == "Cancer")$TPR))
+foo<-barplot(means, col=c("blue","red"), las=1, ylab="Fraction of nuclei correctly predicted" ,
+        names= c("Normal","Cancer"),ylim=c(0,1.1))
+segments(foo, means-se, foo,means+se)
+title(sub= paste("Wilcox test =",round(
+  wilcox.test(subset(Tissue_summary,Tissue_summary$act_Stage=="Normal")$TPR,
+                subset(Tissue_summary,Tissue_summary$act_Stage=="Cancer")$TPR)$p.value,3)), 
+  adj=1, line=4, font=2)  
+box()
+
+rm(foo,se,means)
+```
+
+Printing Tissue level contingency table.
+
+```{r contingency_tables_tissue, echo=FALSE, message=FALSE, warning=FALSE}
+print ("Training")
+print(Tissue_level_acc_train$table)
+print ("Test")
+print(Tissue_level_acc_test$table)
+```
+
+Below are some features that access the validity of the tissue level predictions.
+
+```{r model_robustness_tissue, echo=FALSE, message=FALSE, warning=FALSE}
+tissue_robustness<-cbind(c(Tissue_level_acc_train$byClass,AUC_train),
+                          c(Tissue_level_acc_test$byClass,AUC_test))
+rownames(tissue_robustness)[nrow(tissue_robustness)]<-"AUC_ROC"
+colnames(tissue_robustness)<-c("Training","Test")
+knitr::kable(tissue_robustness, caption="")
+```
+
+### Saving Data and Models
+
+We have saved data and the models generated. 
+
+```{r saving_data_norm_cancer, echo=FALSE, message=FALSE, warning=FALSE}
+
+save(nucleus_pca, file = paste(output_path_to_data,"nucleus_pca_model.RData",sep="") )
+save(pop_avg_feature_value, file = paste(output_path_to_data,"Scaling_para_center.RData",sep="") )
+save(pop_std_feature_value, file = paste(output_path_to_data,"Scaling_para_sd.RData",sep="") )
+save(LDA_normal_vs_cancer, file = paste(output_path_to_data,"LDA_model.RData",sep="") )
+save(upper, file = paste(output_path_to_data,"mgs_upper_limit.RData",sep="") )
+save(lower, file = paste(output_path_to_data,"mgs_lower_limit.RData",sep="") )
+write.csv(nucleus_pca$loadings,file=paste(output_path_to_data,"pca_loadings.csv",sep=""))
+write.csv(LDA_normal_vs_cancer$scaling,file=paste(output_path_to_data,"ld1_loadings.csv",sep=""))
+
+write.csv(lda_summary,file=paste(output_path_to_data,"MGS_Normal_vs_Cancer.csv",sep=""))
+write.csv(Tissue_summary,file=paste(output_path_to_data,"Tissue_Summary_Normal_vs_Cancer.csv",sep=""))
+
+rm(list= ls()[!(ls() %in% c('anno','NMCO_features','Mechano_Genomic_Score_nuclei',
+                            'output_path_to_data','Stage_NiD','Stage_TiD'))])
+source("functions_library.R")
+
+```
+
+
+## Scoring nuclei from TMAs of different stages
+
+Now that we built and validated the scoring system for two extreme conditions, we next wanted to do the same for nuclei from TMA of varying clinical stages.
+
+```{r Scoring_all_nuclei, echo=FALSE, fig.height=4, fig.width=4, fig.align="center", message=FALSE, warning=FALSE}
+MGS_all <- Mechano_Genomic_Score_nuclei(feature_table = NMCO_features,path_to_data = output_path_to_data)
+
+MGS_all$Clinical_Stage<-NA
+MGS_all$Clinical_Stage[which(MGS_all$nucid %in% Stage_NiD$S0_Normal_NiD)]<-"Normal"
+MGS_all$Clinical_Stage[which(MGS_all$nucid %in% Stage_NiD$S1_Hyperplasia_NiD)]<-"Hyperplasia"
+MGS_all$Clinical_Stage[which(MGS_all$nucid %in% Stage_NiD$S2_Fibroadenoma_NiD)]<-"Fibroadenoma"
+MGS_all$Clinical_Stage[which(MGS_all$nucid %in% Stage_NiD$S3_DCIS_NiD)]<-"DCIS"
+MGS_all$Clinical_Stage[which(MGS_all$nucid %in% Stage_NiD$S4_ILC_NiD)]<-"ILC"
+MGS_all$Clinical_Stage[which(MGS_all$nucid %in% Stage_NiD$S5_IDC_NiD)]<-"IDC"
+MGS_all$Clinical_Stage[which(MGS_all$nucid %in% Stage_NiD$S6_Metastatic_NiD)]<-"Metastatic"
+
+Tissue_summary_all_stages<-Tissue_pred_mgs(MGS_all)
+
+
+Tissue_summary_all_stages$Frac_Normal=Tissue_summary_all_stages$n_pred_Normal/Tissue_summary_all_stages$num_nuclei
+Tissue_summary_all_stages$Frac_Cancer=Tissue_summary_all_stages$n_pred_Cancer/Tissue_summary_all_stages$num_nuclei
+
+mgs_for_plotting<-merge(NMCO_features[,which(colnames(NMCO_features) %in% c("centroid-0","centroid-1","nucid"))], MGS_all)
+```
+
+Below we visualize the fraction of nuclei that are predicted as normal or cancer in the various stages.
+
+1. We see that on average 90% of the nuclei in the tissues diagnosed as normal or hyperplasia.
+2. Over 80% of the nuclei in tissues diagnosed as IDC and ILC are classified to the cancer. 
+The above two are in line with the model used above. In addition, we have nuclei from tissues whose diagnostic class was not introduced to the model above. 
+3. Almost all nuclei from Fibroadenoma TMA are classified to be cancer. Fibroadenomas are benign breast tumors characterized by an admixture of stromal and epithelial tissue that develop from the lobules. Hence, it is expected that all the cells in the TMA are somehow affected and are distinct from normal cells in the tissue.
+4. There is high level variability in the nuclei classification fraction for DCIS TMA with some tissues have very high fraction of predicted normal nuclei. This is expected as DCIS tissues contain cancer cells in the Duct and surrounded by normal cells and the fraction of the TMA that is occupied by the Duct is small and highly variable. This is reflected in the variability in the scoring as well. But on average most are classified as cancer and importantly, as seen below, most of the nuclei that are in the duct are classified as cancer. 
+5. Metastatic breast TMAs contain tissue from the the lymph node and these tissues again consists of nuclei from normal cells that reside in that organ as well as breast cancer cells that have metastasised to the node and fraction of these two cell categories will differ between TMAs. Also, given the mechanochemical environment between lymph nodes and breast tissue will be vastly different, it is expected that metastasized cancer cells will have varied nuclear and chromatin features compared to invasive cancer cells in the breast tissue, which were used to train the model. Still, we see that in majority of the TMAs, most of the nuclei are identified to be cancer cells. 
+
+```{r Tissue_level_nuclear_fraction_plots, echo=FALSE, fig.height=8, fig.width=8, message=FALSE, warning=FALSE, fig.align="center"}
+
+cols_cancer_prog<-colorRampPalette(c("blue","gray70",'red'))(7) 
+normal_fraction <- list(subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="Normal")$Frac_Normal,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="Hyperplasia")$Frac_Normal,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="Fibroadenoma")$Frac_Normal,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="DCIS")$Frac_Normal,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="IDC")$Frac_Normal,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="ILC")$Frac_Normal,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="Metastatic")$Frac_Normal)
+
+cancer_fraction<-list(subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="Normal")$Frac_Cancer,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="Hyperplasia")$Frac_Cancer,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="Fibroadenoma")$Frac_Cancer,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="DCIS")$Frac_Cancer,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="IDC")$Frac_Cancer,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="ILC")$Frac_Cancer,
+        subset(Tissue_summary_all_stages,Tissue_summary_all_stages$act_Stage=="Metastatic")$Frac_Cancer)
+
+par(font.axis = 2,font.lab=2,mar=c(5,7,1,1), font=2, mfrow=c(2,2))
+#boxplot with jitter to show the True positive rate/Recall at the tissue level
+boxplot(normal_fraction,
+        xlab="Fraction of nuclei predicted Normal",
+        names = c("Normal","Hyperplasia","Fibroadenoma","DCIS","IDC","ILC","Metastatic"),
+        outline=T, lty=1, horizontal = T, las=1,col=cols_cancer_prog, pch=18)
+stripchart(normal_fraction,
+            vertical = F, method = "jitter", add = TRUE, pch = 18, col = 'black',cex=0.5)
+
+
+#boxplot with jitter to show the True positive rate/Recall at the tissue level
+boxplot(cancer_fraction,
+        xlab="Fraction of nuclei predicted Cancer",
+        names = c("Normal","Hyperplasia","Fibroadenoma","DCIS","IDC","ILC","Metastatic"),
+        outline=T, lty=1, horizontal = T, las=1,col=cols_cancer_prog, pch=18)
+stripchart(cancer_fraction,
+            vertical = F, method = "jitter", add = TRUE, pch = 18, col = 'black',cex=0.5)
+
+means = as.numeric(unlist(lapply(normal_fraction,mean,na.rm=T)))
+se    = as.numeric(unlist(lapply(normal_fraction,sd)))
+foo<-barplot(means, las=1, xlab="Fraction of nuclei predicted Normal" , col = cols_cancer_prog,
+             names=c("Normal","Hyperplasia","Fibroadenoma","DCIS","IDC","ILC","Metastatic"),
+             xlim=c(0,1.1), horiz = T)
+segments( means-se,foo, means+se,foo)
+box()
+
+means = as.numeric(unlist(lapply(cancer_fraction,mean)))
+se    = as.numeric(unlist(lapply(cancer_fraction,sd)))
+foo<-barplot(means, las=1, xlab="Fraction of nuclei predicted Cancer" , col = cols_cancer_prog,
+             names=c("Normal","Hyperplasia","Fibroadenoma","DCIS","IDC","ILC","Metastatic"),
+             xlim=c(0,1.1), horiz = T)
+segments( means-se,foo, means+se,foo)
+box()
+
+```
+
+
+
+Below we check for the number of tissues of the different classes that are predicted as "Normal" or "Cancer" based on the maximum number of predicted nuclear classes. We can see that 
+1. 100% of the tissues that are IDC, ILC, Normal and Hyperplasia are categorised correctly as seen above. 
+2. 100% of the fibroadenoma TMAs are classified as cancer.
+3. 80% of the DCIS tissues are classified as cancer and 20% are classified as normal.
+4. 75% of the metastaic TMAs are classified as cancer. 
+
+```{r contingency_tables_tissue_classes, echo=FALSE, message=FALSE, warning=FALSE}
+tissue_pred<-((table(Tissue_summary_all_stages$act_Stage,Tissue_summary_all_stages$pred_Stage)))
+tissue_pred<-cbind(tissue_pred,
+                   Frac_Cancer = (tissue_pred[,1])/(rowSums(tissue_pred[,1:2]))*100,
+                   Frac_Normal = (tissue_pred[,2])/(rowSums(tissue_pred[,1:2]))*100)
+knitr::kable(tissue_pred)
+```
+
+Below is a histogram and a barplot (mean +/- SD) of all the nuclei from all the TMAs that belong to the different clinical stages. The distribution characteristics are summarized in a table below.
+We see that MGS of nuclei from normal and hyperplasia TMAs is higher. Also , the variability is highest for DCIS. 
+
+
+```{r mgs_hist_class, echo=FALSE, fig.height=4, fig.width=8, message=FALSE, warning=FALSE, fig.align="center"}
+par(font.axis = 2,font.lab=2,mar=c(5,7,1,1), font=2, mfrow=c(1,2))
+stages_of_cancer<-c("Normal","Hyperplasia","Fibroadenoma","DCIS","ILC","IDC","Metastatic")
+distri_charac <- as.data.frame(matrix(nrow =length(stages_of_cancer), ncol = 11 ))
+colnames(distri_charac) <-c("Sample",paste("MGS",c("Mean","Median","Min","Max","SD",
+                                                   "CV","CD","IQR","QCD","FWHM"),sep="_"))
+#plot density curves for individual stages
+plot (NA, xlim=c(-0.1,1.1), ylim = c(0,3.5), las=1,ylab="Prob.Density",xlab="MGS")
+for(index in 1:length(stages_of_cancer)){
+    temp <-  MGS_all[which(MGS_all$Clinical_Stage == stages_of_cancer[index]),]
+    d    <- density(temp$MGS)
+    lines(d, col=cols_cancer_prog[index], lwd=1)
+    distri_charac[index,] <- c(stages_of_cancer[index],distribution_chracteristic(temp$MGS))
+   
+    rm(temp,d)
+}
+
+# plot barplots
+foo<-barplot(as.numeric(distri_charac$MGS_Mean), las=1, 
+             xlab="MGS" ,
+             col = cols_cancer_prog,
+             names=c("Normal","Hyperplasia","Fibroadenoma","DCIS","IDC","ILC","Metastatic"),
+             xlim=c(0,1.1), horiz = T)
+segments( as.numeric(distri_charac$MGS_Median) - as.numeric(distri_charac$MGS_SD),foo,
+          as.numeric(distri_charac$MGS_Median) + as.numeric(distri_charac$MGS_SD),foo)
+box()
+knitr::kable(distri_charac)
+```
+
+
+To make sure that the variability of the MGS from different TMAs are accounted for, we visualise the distribution of MGS for each tissue from different classes.
+
+```{r TMA_mgs_hist_class, echo=FALSE, fig.align="center", fig.height=9, fig.width=6, message=FALSE, warning=FALSE}
+par(font.axis = 2,font.lab=2,mar=c(5,6,1,1), font=2, mfrow=c(4,2))
+t1<-plot_ind_lines_and_Avg(data = MGS_all, feat = "MGS", Clinical_condition = "Normal")
+t2<-plot_ind_lines_and_Avg(data = MGS_all, feat = "MGS", Clinical_condition = "Hyperplasia")
+t3<-plot_ind_lines_and_Avg(data = MGS_all, feat = "MGS", Clinical_condition = "Fibroadenoma")
+t4<-plot_ind_lines_and_Avg(data = MGS_all, feat = "MGS", Clinical_condition = "DCIS")
+t5<-plot_ind_lines_and_Avg(data = MGS_all, feat = "MGS", Clinical_condition = "IDC")
+t6<-plot_ind_lines_and_Avg(data = MGS_all, feat = "MGS", Clinical_condition = "ILC")
+t7<-plot_ind_lines_and_Avg(data = MGS_all, feat = "MGS", Clinical_condition = "Metastatic")
+mgs_distribution_charac<-rbind(t1,t2,t3,t4,t5,t6,t7)
+rm(t1,t2,t3,t4,t5,t6,t7)
+```
+
+Below is a histogram and barplot of the Mean MGS  nuclei of each TMA (error is SD) that belong to the different clinical stages. The distribution characteristics are summarized in a table below.
+We see that MGS of nuclei from normal and hyperplasia TMAs is higher. Also , the variability is highest for DCIS. 
+
+
+```{r TMA_mgs_hist_class_sum, echo=FALSE, fig.height=4, fig.width=8, message=FALSE, warning=FALSE, fig.align="center"}
+par(font.axis = 2,font.lab=2,mar=c(4,4,1,1), font=2, mfrow=c(1,2))
+stages_of_cancer<-c("Normal","Hyperplasia","Fibroadenoma","DCIS","ILC","IDC","Metastatic")
+distri_charac <- as.data.frame(matrix(nrow =length(stages_of_cancer), ncol = 13 ))
+colnames(distri_charac) <-c("Sample",paste("MGS",c("Mean","Median","Min","Max","SD",
+                                                   "CV","CD","IQR","QCD","FWHM",
+                                                   "Skew","Kurtosis"),sep="_"))
+#plot density curves for individual stages
+plot (NA, xlim=c(-0.1,1.1), ylim = c(0,10), las=1,ylab="Prob.Density",xlab="MGS")
+for(index in 1:length(stages_of_cancer)){
+    temp <-  mgs_distribution_charac[which(mgs_distribution_charac$Clincal_Stage == stages_of_cancer[index]),]
+    d    <- density(as.numeric(temp$Mean))
+    lines(d, col=cols_cancer_prog[index], lwd=1)
+    distri_charac[index,] <- c(stages_of_cancer[index],distribution_chracteristic( as.numeric(temp$Mean)))
+   
+    rm(temp,d)
+}
+
+par(mar=c(4,7,1,1))
+# plot barplots
+foo<-barplot(as.numeric(distri_charac$MGS_Mean), las=1, 
+             xlab="MGS" ,
+             col = cols_cancer_prog,
+             names=c("Normal","Hyperplasia","Fibroadenoma","DCIS","IDC","ILC","Metastatic"),
+             xlim=c(0,1.1), horiz = T)
+segments( as.numeric(distri_charac$MGS_Mean) - as.numeric(distri_charac$MGS_SD),foo,
+          as.numeric(distri_charac$MGS_Mean) + as.numeric(distri_charac$MGS_SD),foo)
+box()
+
+knitr::kable(distri_charac)
+```
+
+Visualising the Score for a DCIS TMA.
+
+```{r Visulaising_MGS_DCIS, echo=FALSE, fig.height=6, fig.width=6, fig.align="center"}
+Visualise_MGS(mgs_for_plotting,"BR2082B_H15")
+```
+
+### Output Data
+Save the MGS scores and tissue summary for all stages
+
+```{r saving_data_all_stages, echo=FALSE, fig.height=4, fig.width=4, message=FALSE, warning=FALSE}
+
+write.csv(MGS_all,file=paste(output_path_to_data,"MGS_all_Stages.csv",sep=""))
+write.csv(mgs_for_plotting,file=paste(output_path_to_data,"MGS_for_plotting.csv",sep=""))
+write.csv(Tissue_summary_all_stages,file=paste(output_path_to_data,"Tissue_Summary_all_Stages.csv",sep=""))
+
+```
+
+## SessionInfo
+
+```{r session_info, echo=FALSE}
+sessionInfo()
+```
+
