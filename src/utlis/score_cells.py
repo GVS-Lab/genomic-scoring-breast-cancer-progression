@@ -32,7 +32,7 @@ def score_vis_with_groundtruth_data(DNA_labeled_regions,biomarker_labeled_region
         path_to_pretrained_datamodels = os.path.join(os.path.dirname(os.path.dirname(DNA_labeled_regions)) ,"scoring_model/model/")
         
     if(not path_to_seg_model):
-        path_to_seg_model = os.path.join(os.path.dirname(os.getcwd()),'models/')
+        path_to_seg_model = os.path.join(os.path.dirname(os.path.dirname(DNA_labeled_regions)),'segmentation_model/')
         
     if(not path_to_output_segmented_nuclei):
         path_to_output_segmented_nuclei = os.path.join(os.path.dirname(os.path.dirname(DNA_labeled_regions)) , "Segmented_nucleus/")
