@@ -19,5 +19,5 @@ Below is a graphical summary of the tissue/ neighborhhood features computed.
 
 Please refer to the notes_on_feature_extraction for more information on the features and their computation.
 
-### Cell heath score
+### Scoring cell health
 The aim of this project is to compute a metric, based on the chromatin structures that can distinguish between a normal and pathogenic cell in breast tissues. The developement of one such score, we term mechano-genomic score is explaind in _R_notebooks/Constructing_Mechano_genomic_score.Rmd_. To demonstrate our work we have provided a few sample images [here](https://www.dropbox.com/sh/4cv8u3zoma8xth0/AAB-sUA_sG8Y1q0GHZ1JqSHGa?dl=0) and one can run the notebook _python_notebooks/score_nuclei_given_an_image.ipynb_. For reference, we include the DNA labelled image and the protein expression of standard biomarkers.
